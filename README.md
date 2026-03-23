@@ -15,7 +15,7 @@
 
 ```
 # 下载并解压配套提供的rk-sdk
-mkdir sdk
+mkdir sdk && cd sdk
 wget https://bithion.obs.cn-east-3.myhuaweicloud.com/%E5%AD%97%E5%97%A8%E5%BC%80%E6%BA%90sdk%E5%8C%85/rv110x_ipc_min_sdk_final_20260323.tar.gz
 tar -zxvf rv110x_ipc_min_sdk_final_20260323.tar.gz
 # 下载并解压配套提供的bithion-core-sdk
