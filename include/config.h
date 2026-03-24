@@ -31,7 +31,7 @@
 // 录音/VAD 采集参数
 #define ZH_AUDIO_DEVICE "hw:0,0" // 采集设备
 #define ZH_AUDIO_CHANNELS 2 // ALSA 需要双通道；Rockit 录音为单通道并在软件中上混到双通道
-#define ZH_AUDIO_GAIN 20.0f // 录音增益倍率，>1放大，<1衰减
+#define ZH_AUDIO_GAIN 1.0f // 录音增益倍率，>1放大，<1衰减
 
 // Rockit/RK_MPI AI+VQE(AEC) 配置
 #define ZH_RK_AIVQE_CONFIG_PATH "/oem/usr/share/vqefiles/config_aivqe.json"

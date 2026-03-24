@@ -30,6 +30,19 @@ struct zh_audio_capture {
     size_t stash_len;
 };
 
+static void zh_rk_apply_ai_defaults(AUDIO_DEV dev) {
+    AUDIO_FADE_S fade;
+    memset(&fade, 0, sizeof(fade));
+    if (RK_MPI_AI_SetMute(dev, RK_FALSE, &fade) != RK_SUCCESS) {
+        LOGE(__func__, "RK_MPI_AI_SetMute failed: dev=%d", dev);
+    }
+    if (RK_MPI_AI_SetVolume(dev, 100) != RK_SUCCESS) {
+        LOGE(__func__, "RK_MPI_AI_SetVolume failed: dev=%d volume=100", dev);
+    } else {
+        LOGI(__func__, "AI capture defaults applied: dev=%d mute=0 volume=100", dev);
+    }
+}
+
 static AUDIO_SAMPLE_RATE_E zh_rk_map_rate(unsigned int rate) {
     switch (rate) {
         case 8000: return AUDIO_SAMPLE_RATE_8000;
@@ -173,17 +186,6 @@ int zh_audio_capture_init(zh_audio_capture_t **cap,
         return -1;
     }
 
-    if (ctx->out_channels == 1) {
-        RK_S32 tm_ret = RK_MPI_AI_SetTrackMode(ctx->dev, AUDIO_TRACK_OUT_STEREO);
-        if (tm_ret != RK_SUCCESS) {
-            LOGE(__func__, "RK_MPI_AI_SetTrackMode failed: %d", tm_ret);
-        } else {
-            LOGI(__func__, "RK_MPI_AI_SetTrackMode ok: AUDIO_TRACK_OUT_STEREO");
-        }
-    } else {
-        LOGI(__func__, "RK_MPI_AI_SetTrackMode: skip (keep normal)");
-    }
-
     LOGI(__func__, "rockit ai attr: card=%s dev=%d chn=%d rate=%u dev_ch=%u out_ch=%u bits=16 frame=%u (%ums)",
          ZH_RK_AI_CARD_NAME, ctx->dev, ctx->chn, ZH_AUDIO_SAMPLE_RATE, ctx->dev_channels,
          ctx->out_channels, attr.u32PtNumPerFrm, ai_frame_ms);
@@ -252,6 +254,18 @@ int zh_audio_capture_init(zh_audio_capture_t **cap,
         LOGI(__func__, "RK_MPI_AI_SetChnAttr ok");
     }
 
+    if (ctx->out_channels == 1) {
+        RK_S32 tm_ret = RK_MPI_AI_SetTrackMode(ctx->dev, AUDIO_TRACK_OUT_STEREO);
+        if (tm_ret != RK_SUCCESS) {
+            LOGE(__func__, "RK_MPI_AI_SetTrackMode failed: %d", tm_ret);
+        } else {
+            LOGI(__func__, "RK_MPI_AI_SetTrackMode ok: AUDIO_TRACK_OUT_STEREO");
+        }
+    } else {
+        LOGI(__func__, "RK_MPI_AI_SetTrackMode: skip (keep normal)");
+    }
+    zh_rk_apply_ai_defaults(ctx->dev);
+
     if (actual_rate) {
         *actual_rate = ZH_AUDIO_SAMPLE_RATE;
     }
@@ -309,42 +323,33 @@ int zh_audio_capture_read(zh_audio_capture_t *cap, int16_t *buffer, size_t sampl
             return -1;
         }
 
+        RK_U32 mb_bytes = RK_MPI_MB_GetSize(frame.pMbBlk);
         size_t in_samples_per_ch = frame.u32Len / sizeof(int16_t);
-        size_t in_samples_total = in_samples_per_ch * cap->out_channels;
         if (in_samples_per_ch == 0) {
             if (!logged) {
-                LOGE(__func__, "empty frame: u32Len=0 seq=%u", frame.u32Seq);
+                LOGE(__func__, "empty frame: u32Len=%u mb_bytes=%u seq=%u soundmode=%d",
+                     frame.u32Len, mb_bytes, frame.u32Seq, frame.enSoundMode);
                 logged = 1;
             }
             RK_MPI_AI_ReleaseFrame(cap->dev, cap->chn, &frame, &aec);
             return -1;
         }
         if (!logged) {
-            LOGI(__func__, "first frame: len=%u seq=%u out_ch=%u",
-                 frame.u32Len, frame.u32Seq, cap->out_channels);
+            LOGI(__func__, "first frame: u32Len=%u mb_bytes=%u seq=%u soundmode=%d out_ch=%u",
+                 frame.u32Len, mb_bytes, frame.u32Seq, frame.enSoundMode, cap->out_channels);
             logged = 1;
         }
 
-        size_t append_samples = (cap->out_channels == ZH_AUDIO_CHANNELS)
-                                    ? in_samples_total
-                                    : in_samples_per_ch * ZH_AUDIO_CHANNELS;
+        size_t append_samples = in_samples_per_ch * ZH_AUDIO_CHANNELS;
         if (zh_rk_stash_reserve(cap, append_samples) != 0) {
             RK_MPI_AI_ReleaseFrame(cap->dev, cap->chn, &frame, &aec);
             return -1;
         }
 
-        if (cap->out_channels == ZH_AUDIO_CHANNELS) {
-            memcpy(cap->stash + cap->stash_len, src, in_samples_total * sizeof(int16_t));
-            cap->stash_len += in_samples_total;
-        } else if (cap->out_channels == 1 && ZH_AUDIO_CHANNELS == 2) {
-            for (size_t i = 0; i < in_samples_per_ch; ++i) {
-                int16_t v = src[i];
-                cap->stash[cap->stash_len++] = v;
-                cap->stash[cap->stash_len++] = v;
-            }
-        } else {
-            memcpy(cap->stash + cap->stash_len, src, in_samples_total * sizeof(int16_t));
-            cap->stash_len += in_samples_total;
+        for (size_t i = 0; i < in_samples_per_ch; ++i) {
+            int16_t v = src[i];
+            cap->stash[cap->stash_len++] = v;
+            cap->stash[cap->stash_len++] = v;
         }
 
         RK_MPI_AI_ReleaseFrame(cap->dev, cap->chn, &frame, &aec);
