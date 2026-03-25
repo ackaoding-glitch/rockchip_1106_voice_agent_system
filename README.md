@@ -1,84 +1,209 @@
-# 瑞芯微实时语音/视觉交互系统
+# rockchip_1106_voice_agent_system
 
-`rockchip_1106_voice_agent_system` 是上海字嗨科技的语音对话客户端开源仓库。产物是zh_client和zh_ble_gatt_server。
+**A real-time voice agent system for Rockchip RV1106, with AI vision and face recognition.**
 
-这是一个结合了实时语音，实时AI视觉，人脸识别的交互系统（real-time voice AI vision and face recognition: RTCV SYSTEM)。
+[中文文档](README_CN.md) | English
 
-本仓库公开的是客户端主程序，完整构建依赖配套提供的 `bithion-core` SDK 包以及rk-sdk环境。
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-RV1106-green.svg)](#hardware)
+[![Language](https://img.shields.io/badge/Language-C11-orange.svg)](#build)
 
-如果想完整部署客户端客户端程序，需要配套的板子和rv1106_zh_clinet_installer仓库。
+---
 
+## What is this?
 
-## 快速开始
+This is the on-device client for an embedded voice AI agent running on the Rockchip RV1106 SoC. It handles the full device-side pipeline — from microphone capture and VAD to real-time duplex audio streaming, face recognition, and music playback — all in ~5K lines of C.
 
-我们提供了交付仓库[rv1106_zh_clinet_installer](https://github.com/ackaoding-glitch/rockchip_1106_ai_client_installer),可以快速烧写镜像，安装客户端。
+The system is designed for always-on, low-latency conversational AI on resource-constrained hardware (128MB RAM, ARM Cortex-A7).
 
-如果要从头构建zh_client，可以按以下步骤操作：
+### Key Capabilities
+
+- **Real-time voice interaction** — sub-100ms VAD latency, Opus-encoded streaming uplink, UDP-based TTS downlink
+- **Hardware-accelerated audio processing** — AEC, beamforming, noise reduction, AGC via Rockchip VQE pipeline
+- **On-device face recognition** — face detection and face recognition(30fps)
+- **Vision upload** — camera frame capture with server-side AI analysis
+- **BLE provisioning** — zero-touch WiFi setup via GATT service
+- **Robust connectivity** — auto-reconnect WebSocket, WiFi recovery, graceful degradation
+
+## Architecture
 
 ```
-## 构建环境 ubuntu:2204 x86_64
-# 下载并解压配套提供的rk-sdk
+┌─────────────────────────────────────────────────────────────────┐
+│                         zh_client                               │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌─────────────┐  ┌────────────┐  │
+│  │  Audio    │  │  Audio   │  │    Face      │  │   Music    │  │
+│  │  Uplink   │  │ Playback │  │ Recognition  │  │   Player   │  │
+│  │          │  │          │  │             │  │            │  │
+│  │ Capture → │  │ Opus  →  │  │ Camera  →   │  │ HTTP   →   │  │
+│  │ VAD    → │  │ Decode → │  │ Detect  →   │  │ MP3    →   │  │
+│  │ Opus   → │  │ PCM   → │  │ Embed   →   │  │ Resamp →   │  │
+│  │ Upload   │  │ Speaker  │  │ Match/Upload │  │ Playback   │  │
+│  └────┬─────┘  └────┬─────┘  └──────┬──────┘  └─────┬──────┘  │
+│       │              │               │               │          │
+│  ┌────┴──────────────┴───────────────┴───────────────┴──────┐  │
+│  │                    bithion-core SDK                        │  │
+│  │  HTTP/WS/UDP transport · VAD engine · Session management  │  │
+│  └──────────────────────────┬────────────────────────────────┘  │
+│                             │                                   │
+│  ┌──────────────────────────┴────────────────────────────────┐  │
+│  │              Rockchip RK_MPI / Rockit                      │  │
+│  │           Audio I/O · VQE (AEC/BF/ANR/AGC)                │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                         ┌────┴────┐
+                         │ RV1106  │
+                         │ Hardware│
+                         └─────────┘
+```
+
+### Audio Pipeline
+
+```
+         UPLINK                                    DOWNLINK
+  Mic ──→ Rockit Capture ──→ VQE/AEC          Server T(TS Opus/UDP)
+              │                                      │
+         2ch 16kHz                              Opus Decode
+              │                                      │
+             VAD                               Gain Adjust
+              │                                      │
+         Preroll Buffer (10 frames)             Rockit/ALSA
+              │                                      │
+         Opus Encode (16kbps mono)              Speaker Out
+              │
+         UDP Uplink → Server
+```
+
+### Session Lifecycle
+
+```
+Boot → WiFi Check ──[fail]──→ BLE Provisioning ──→ WiFi Connect
+                │                                        │
+                └──[ok]──→ HTTP Device Bind ─────────────┘
+                                  │
+                           WS Auth (5s timeout)
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │      Main Event Loop       │
+                    │                            │
+                    │  VAD Start ──→ Audio TX    │
+                    │  STT Done  ──→ TTS RX     │
+                    │  Face Detect → Upload      │
+                    │  Music Cmd  → Playback     │
+                    │                            │
+                    └────────────┬───────────────┘
+                                 │
+                          [WS error/close]
+                                 │
+                          Auto Reconnect (3s)
+```
+
+### Build Artifacts
+
+| Binary | Description |
+|--------|-------------|
+| `zh_client` | Main voice agent daemon |
+| `zh_ble_gatt_server` | BLE WiFi provisioning service |
+
+## Build
+
+### Prerequisites
+
+- **Host:** Ubuntu 22.04 x86_64
+- **Toolchain:** `arm-rockchip830-linux-uclibcgnueabihf-gcc-8.3.0` (included in RK SDK)
+- **Rockchip SDK:** Board-level SDK for RV1106 (minimal extraction provided)
+- **bithion-core SDK:** Communication and VAD engine
+
+### Quick Start
+
+```bash
+# Download SDKs
 mkdir sdk && cd sdk
 wget https://bithion.obs.cn-east-3.myhuaweicloud.com/%E5%AD%97%E5%97%A8%E5%BC%80%E6%BA%90sdk%E5%8C%85/rv110x_ipc_min_sdk_final_20260323.tar.gz
-tar -zxvf rv110x_ipc_min_sdk_final_20260323.tar.gz
-# 下载并解压配套提供的bithion-core-sdk
 wget https://bithion.obs.cn-east-3.myhuaweicloud.com/%E5%AD%97%E5%97%A8%E5%BC%80%E6%BA%90sdk%E5%8C%85/bithion-core-sdk-20260323.tar.gz
-tar -zxvf bithion-core-sdk-20260323.tar.gz
-
-# 返回项目根目录，编译
+tar xzf rv110x_ipc_min_sdk_final_20260323.tar.gz
+tar xzf bithion-core-sdk-20260323.tar.gz
 cd ..
+
+# Build
 cmake -S . -B build \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake \
   -DTOOLCHAIN_ROOT=sdk/rv110x_ipc_min_sdk_final_20260323/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf \
   -DRK_SDK_ROOT=sdk/rv110x_ipc_min_sdk_final_20260323 \
   -DBITHION_CORE_SDK_ROOT=sdk/bithion-core-sdk
-cmake --build build -j"$(nproc)"
+cmake --build build -j$(nproc)
 ```
 
-## 仓库范围
+### Deployment
 
-本仓库包含：
+For full device deployment (flashing + installation), see the companion repository:
+[rv1106_zh_clinet_installer](https://github.com/ackaoding-glitch/rockchip_1106_ai_client_installer)
 
-- 设备侧主程序 `zh_client`
-- BLE 配网服务 `zh_ble_gatt_server`
-- 人脸相关测试程序 `zh_face_test`
-- 宿主侧业务逻辑、设备接入逻辑与部署脚本
-- 构建本仓库时会配套提供 `bithion-core` SDK
-- 构建本仓库时还会配套提供一个从原始板级 SDK 中提取出的最小编译依赖包`rk-sdk\rv110x_ipc_min_sdk_final_20260323.tar.gz`
+## Hardware
 
-## 功能概览
+| Component | Specification |
+|-----------|--------------|
+| **SoC** | Rockchip RV1106 (ARM Cortex-A7) |
+| **RAM** | 128MB |
+| **Audio In** | Dual-mic (stereo capture, AEC reference on R channel) |
+| **Audio Out** | Mono speaker via codec |
+| **Camera** | V4L2-compatible |
+| **Network** | WiFi 802.11 b/g/n |
+| **Bluetooth** | BLE for provisioning |
+| **NPU** | RKNN for face model inference |
+| **Storage** | NAND/eMMC (`/oem/`, `/data/` partitions) |
 
-客户端宿主程序主要负责：
+## Protocol Stack
 
-- 设备启动与联网流程
-- BLE 配网
-- 本地音频采集、播放与提示音控制
-- 音乐、人脸、视觉等本地业务能力联动
-- 对底层通信消息进行业务解释并驱动设备动作
+| Layer | Protocol | Purpose |
+|-------|----------|---------|
+| Transport | **UDP** | Low-latency TTS audio streaming |
+| Application | **WebSocket** | Bidirectional control & signaling |
+| Application | **HTTP/TLS** | Device binding, file upload (S3 presigned) |
+| IPC | **Unix Domain Socket** | Face engine communication |
+| Bluetooth | **BLE GATT** | WiFi credential provisioning |
 
-底层设备绑定、会话管理以及 HTTP / WebSocket / UDP 基础通信能力由配套提供的 `bithion-core` SDK 提供。
+## Configuration
 
-## 目录说明
+Key parameters in [`include/config.h`](include/config.h):
 
-- `src/`：客户端宿主程序源码
-- `include/`：宿主侧头文件与桥接头
-- `docs/`：公开文档
-- `scripts/`：辅助脚本
-- `installer/`：安装与部署相关资源
-- `third_party/`：随仓分发的第三方依赖与许可证文件
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ZH_AUDIO_FRAME_SAMPLES` | 160 | Samples per frame (16kHz) |
+| `ZH_TTS_GAIN` | 0.5 | TTS playback volume multiplier |
+| `ZH_WS_RECONNECT_INTERVAL_MS` | 3000 | WebSocket reconnect delay |
+| `ZH_RK_ENABLE_LOOPBACK` | 1 | AEC loopback reference enable |
 
-## 开源边界
+Audio VQE pipeline configuration: [`scripts/installer/config_aivqe.json`](scripts/installer/config_aivqe.json)
 
-读者可以通过本仓库了解：
+## Open Source Boundary
 
-- 宿主程序的整体结构
-- 客户端如何接入私有通信 SDK
-- 板端部署所需的脚本与资源组织方式
+This repository contains the **device-side application layer**. You can study:
 
-但本仓库仍不是一个可脱离配套 SDK 与目标设备环境、立即独立运行的完整设备交付物。
+- The host program architecture and threading model
+- How a voice agent client integrates with a proprietary communication SDK
+- Board-level deployment scripts and resource organization
+- Audio processing pipeline design for embedded Linux
 
-## 许可证
+**Not included:** The `bithion-core` SDK (provided as a prebuilt binary) and the server-side infrastructure. This is not a standalone, self-contained runtime — it requires the companion SDKs and target hardware.
 
-除另有说明的第三方组件外，本仓库中的源码与文档按 Apache License 2.0 分发，详见仓库根目录的 `LICENSE`。
+## Third-Party Licenses
 
-第三方组件许可证见 `third_party/licenses/`。
+| Component | License |
+|-----------|---------|
+| [Opus](https://opus-codec.org/) 1.6.1 | BSD-3-Clause |
+| [ALSA](https://alsa-project.org/) 1.1.5 | LGPL-2.1+ |
+| [minimp3](https://github.com/lieff/minimp3) | CC0-1.0 |
+
+Full license texts: [`third_party/licenses/`](third_party/licenses/)
+
+## License
+
+```
+Copyright 2026 Shanghai ZiHai Technology Co., Ltd.
+
+Licensed under the Apache License, Version 2.0.
+See LICENSE for details.
+```
+
