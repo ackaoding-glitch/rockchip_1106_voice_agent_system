@@ -25,6 +25,84 @@ static pthread_t g_uplink_thread;
 static pthread_mutex_t g_uplink_ws_mutex = PTHREAD_MUTEX_INITIALIZER;
 static zh_ws_session_t *g_uplink_ws = NULL;
 
+static int16_t zh_abs_i16(int16_t v) {
+    if (v >= 0) {
+        return v;
+    }
+    if (v == INT16_MIN) {
+        return INT16_MAX;
+    }
+    return (int16_t)(-v);
+}
+
+static int zh_audio_vad_gate_filter(const int16_t *in,
+                                    int16_t *out,
+                                    size_t samples,
+                                    int *gate_open,
+                                    int *below_close_frames,
+                                    int16_t *out_peak) {
+#if ZH_VAD_GATE_ENABLE
+    int16_t peak = 0;
+    int open_threshold = ZH_VAD_GATE_OPEN_PEAK;
+    int close_threshold = ZH_VAD_GATE_CLOSE_PEAK;
+    int hold_frames = ZH_VAD_GATE_HOLD_FRAMES;
+
+    if (!in || !out || !gate_open || !below_close_frames || !out_peak || samples == 0) {
+        return 0;
+    }
+    if (close_threshold > open_threshold) {
+        close_threshold = open_threshold;
+    }
+    if (hold_frames < 1) {
+        hold_frames = 1;
+    }
+
+    for (size_t i = 0; i < samples; ++i) {
+        int16_t abs_sample = zh_abs_i16(in[i]);
+        if (abs_sample > peak) {
+            peak = abs_sample;
+        }
+    }
+    *out_peak = peak;
+
+    if (*gate_open) {
+        if (peak < close_threshold) {
+            *below_close_frames += 1;
+            if (*below_close_frames >= hold_frames) {
+                *gate_open = 0;
+            }
+        } else {
+            *below_close_frames = 0;
+        }
+    } else if (peak >= open_threshold) {
+        *gate_open = 1;
+        *below_close_frames = 0;
+    }
+
+    if (*gate_open) {
+        memcpy(out, in, sizeof(int16_t) * samples);
+    } else {
+        memset(out, 0, sizeof(int16_t) * samples);
+    }
+    return *gate_open;
+#else
+    int16_t peak = 0;
+
+    if (!in || !out || !out_peak || samples == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < samples; ++i) {
+        int16_t abs_sample = zh_abs_i16(in[i]);
+        if (abs_sample > peak) {
+            peak = abs_sample;
+        }
+    }
+    *out_peak = peak;
+    memcpy(out, in, sizeof(int16_t) * samples);
+    return 1;
+#endif
+}
+
 #if ZH_VAD_RECORD_DUMP_ENABLE
 static void zh_pre_opus_pcm_dump_write(FILE *fp, const int16_t *pcm, size_t samples) {
     if (!fp || !pcm || samples == 0) {
@@ -152,10 +230,13 @@ static void *zh_audio_uplink_thread_main(void *arg) {
     zh_core_vad_t *vad = NULL;
     OpusEncoder *enc = NULL;
     int16_t *frame = NULL;
+    int16_t *vad_frame = NULL;
     int16_t preroll[ZH_VAD_PREROLL_FRAMES][ZH_AUDIO_FRAME_SAMPLES * ZH_AUDIO_CHANNELS];
     size_t preroll_pos = 0;
     int preroll_full = 0;
     int speech_active = 0;
+    int vad_gate_open = 0;
+    int vad_gate_below_close_frames = 0;
     int stt_completed_seen = 0;
     int music_state_last_reported = -1;
     unsigned int actual_rate = 0;
@@ -195,6 +276,11 @@ static void *zh_audio_uplink_thread_main(void *arg) {
         LOGE(__func__, "frame alloc failed");
         goto cleanup;
     }
+    vad_frame = (int16_t *)calloc(ZH_AUDIO_FRAME_SAMPLES * ZH_AUDIO_CHANNELS, sizeof(int16_t));
+    if (!vad_frame) {
+        LOGE(__func__, "vad frame alloc failed");
+        goto cleanup;
+    }
 
 #if ZH_VAD_RECORD_DUMP_ENABLE
     pre_opus_dump_fp = fopen(ZH_VAD_RECORD_DUMP_PATH, "ab");
@@ -207,8 +293,10 @@ static void *zh_audio_uplink_thread_main(void *arg) {
     while (g_uplink_running) {
         zh_ws_session_t *ws = NULL;
         zh_core_vad_result_t result;
+        int16_t vad_peak = 0;
         int got = 0;
         int was_speech_active = 0;
+        int was_vad_gate_open = 0;
         int frame_flushed_in_preroll = 0;
 
         got = zh_audio_capture_read(cap, frame, ZH_AUDIO_FRAME_SAMPLES * ZH_AUDIO_CHANNELS);
@@ -240,6 +328,8 @@ static void *zh_audio_uplink_thread_main(void *arg) {
                 speech_active = 0;
                 preroll_pos = 0;
                 preroll_full = 0;
+                vad_gate_open = 0;
+                vad_gate_below_close_frames = 0;
                 zh_face_recognition_set_active(0);
                 zh_core_vad_reset(vad);
                 zh_core_uplink_reset();
@@ -249,7 +339,20 @@ static void *zh_audio_uplink_thread_main(void *arg) {
         }
 
         was_speech_active = speech_active;
-        if (zh_core_vad_process(vad, frame, ZH_AUDIO_FRAME_SAMPLES, ZH_AUDIO_CHANNELS, &result) != 0) {
+        was_vad_gate_open = vad_gate_open;
+        (void)zh_audio_vad_gate_filter(frame,
+                                       vad_frame,
+                                       ZH_AUDIO_FRAME_SAMPLES * ZH_AUDIO_CHANNELS,
+                                       &vad_gate_open,
+                                       &vad_gate_below_close_frames,
+                                       &vad_peak);
+        if (!was_vad_gate_open && vad_gate_open) {
+            LOGI(__func__,
+                 "vad gate opened: peak=%d open=%d",
+                 (int)vad_peak,
+                 ZH_VAD_GATE_OPEN_PEAK);
+        }
+        if (zh_core_vad_process(vad, vad_frame, ZH_AUDIO_FRAME_SAMPLES, ZH_AUDIO_CHANNELS, &result) != 0) {
             continue;
         }
         speech_active = result.speech_active;
@@ -314,6 +417,9 @@ static void *zh_audio_uplink_thread_main(void *arg) {
     }
 
 cleanup:
+    if (vad_frame) {
+        free(vad_frame);
+    }
     if (frame) {
         free(frame);
     }

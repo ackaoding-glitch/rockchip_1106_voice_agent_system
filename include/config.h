@@ -32,6 +32,19 @@
 #define ZH_AUDIO_DEVICE "hw:0,0" // 采集设备
 #define ZH_AUDIO_CHANNELS 2 // ALSA 需要双通道；Rockit 录音为单通道并在软件中上混到双通道
 #define ZH_AUDIO_GAIN 1.0f // 录音增益倍率，>1放大，<1衰减
+// VAD 前置音量门限：仅影响 VAD 输入，不改变上传音频主链路
+#ifndef ZH_VAD_GATE_ENABLE
+#define ZH_VAD_GATE_ENABLE 1
+#endif
+#ifndef ZH_VAD_GATE_OPEN_PEAK
+#define ZH_VAD_GATE_OPEN_PEAK 8000 // 峰值达到该阈值后放行到 VAD
+#endif
+#ifndef ZH_VAD_GATE_CLOSE_PEAK
+#define ZH_VAD_GATE_CLOSE_PEAK 800 // 峰值连续低于该阈值后关闭门限
+#endif
+#ifndef ZH_VAD_GATE_HOLD_FRAMES
+#define ZH_VAD_GATE_HOLD_FRAMES 8 // 关闭前保持帧数，避免抖动
+#endif
 
 // Rockit/RK_MPI AI+VQE(AEC) 配置
 #define ZH_RK_AIVQE_CONFIG_PATH "/oem/usr/share/vqefiles/config_aivqe.json"
